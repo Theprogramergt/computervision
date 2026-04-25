@@ -1,7 +1,8 @@
 import streamlit as st
 import cv2
 import numpy as np
-from PIL import Image
+import tempfile
+import os
 
 # ─── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -130,6 +131,19 @@ st.markdown("""
         margin-bottom: 1rem;
     }
 
+    .video-badge {
+        display: inline-block;
+        background: #00ccff22;
+        border: 1px solid #00ccff;
+        color: #00ccff;
+        font-family: 'Orbitron', monospace;
+        font-size: 0.7rem;
+        padding: 0.2rem 0.7rem;
+        border-radius: 20px;
+        letter-spacing: 2px;
+        margin-bottom: 1rem;
+    }
+
     .info-box {
         background: #001a0a;
         border: 1px solid #00ff88;
@@ -152,9 +166,7 @@ st.markdown("""
     }
 
     img { border-radius: 8px; }
-
     [data-testid="stImage"] { border-radius: 8px; overflow: hidden; }
-
     [data-testid="stCameraInput"] > div {
         border: 1px solid #1e1e3a !important;
         border-radius: 12px !important;
@@ -219,19 +231,76 @@ def show_result(original, result, edges, line_count):
         """, unsafe_allow_html=True)
 
 
+def process_video(video_path, canny_low, canny_high, hough_threshold, min_line_length, max_line_gap):
+    cap = cv2.VideoCapture(video_path)
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    duration = round(total_frames / fps, 1) if fps > 0 else 0
+
+    # Output video setup
+    out_path = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    out = cv2.VideoWriter(out_path, fourcc, fps, (800, 500))
+
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    preview_slot = st.empty()
+
+    frame_idx = 0
+    total_lines_all = 0
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        result, edges, line_count = process_frame(
+            frame, canny_low, canny_high, hough_threshold, min_line_length, max_line_gap
+        )
+        total_lines_all += line_count
+        out.write(result)
+
+        # Update every 15 frames
+        if frame_idx % 15 == 0:
+            progress = int((frame_idx / max(total_frames, 1)) * 100)
+            progress_bar.progress(progress)
+            status_text.markdown(f"""
+            <div style="font-family:'Rajdhani',sans-serif; color:#00ff88; font-size:0.85rem; letter-spacing:2px;">
+                PROCESSING FRAME {frame_idx} / {total_frames} — {progress}%
+            </div>
+            """, unsafe_allow_html=True)
+            preview_slot.image(bgr_to_rgb(result), caption=f"Preview — Frame {frame_idx}", use_container_width=True)
+
+        frame_idx += 1
+
+    cap.release()
+    out.release()
+    progress_bar.progress(100)
+    status_text.markdown("""
+    <div style="font-family:'Rajdhani',sans-serif; color:#00ff88; font-size:0.85rem; letter-spacing:2px;">
+        ✅ PROCESSING COMPLETE
+    </div>
+    """, unsafe_allow_html=True)
+    preview_slot.empty()
+
+    return out_path, total_frames, fps, duration, total_lines_all
+
+
 # ─── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown('<div class="section-header">⚙ Detection Parameters</div>', unsafe_allow_html=True)
 
-    canny_low = st.slider("Canny Low Threshold", 10, 150, 50)
-    canny_high = st.slider("Canny High Threshold", 50, 300, 150)
-    hough_threshold = st.slider("Hough Threshold", 20, 200, 100)
-    min_line_length = st.slider("Min Line Length", 10, 150, 40)
-    max_line_gap = st.slider("Max Line Gap", 1, 50, 5)
+    canny_low    = st.slider("Canny Low Threshold",  10,  150,  50)
+    canny_high   = st.slider("Canny High Threshold", 50,  300, 150)
+    hough_threshold   = st.slider("Hough Threshold",      20,  200, 100)
+    min_line_length   = st.slider("Min Line Length",       10,  150,  40)
+    max_line_gap      = st.slider("Max Line Gap",           1,   50,   5)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown('<div class="section-header">Mode:</div>', unsafe_allow_html=True)
-    mode = st.radio("", ["🖼️  Image Upload", "🎥  Live Camera"], label_visibility="collapsed")
+    st.markdown('<div class="section-header">📡 Mode</div>', unsafe_allow_html=True)
+    mode = st.radio("", ["🖼️  Image Upload", "🎥  Live Camera", "🎬  Video Upload"],
+                    label_visibility="collapsed")
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("""
@@ -259,32 +328,28 @@ if "🖼️" in mode:
 
     if uploaded_files:
         uploaded_files = uploaded_files[:5]
-
         total_lines = 0
         processed_count = 0
 
         col1, col2, col3 = st.columns(3)
         stat_placeholders = [col1.empty(), col2.empty(), col3.empty()]
-
         st.markdown("<br>", unsafe_allow_html=True)
 
         for i, uploaded_file in enumerate(uploaded_files):
             file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
             image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-
             if image is None:
                 continue
 
             result, edges, line_count = process_frame(
                 image, canny_low, canny_high, hough_threshold, min_line_length, max_line_gap
             )
-
             total_lines += line_count
             processed_count += 1
 
             st.markdown(f'<div class="section-header">IMAGE {i+1} — {uploaded_file.name}</div>', unsafe_allow_html=True)
             show_result(image, result, edges, line_count)
-            st.markdown("<hr style='border-color:#1e1e3a; margin: 1.5rem 0'>", unsafe_allow_html=True)
+            st.markdown("<hr style='border-color:#1e1e3a; margin:1.5rem 0'>", unsafe_allow_html=True)
 
         with stat_placeholders[0]:
             st.markdown(f"""<div class="stat-box">
@@ -305,7 +370,7 @@ if "🖼️" in mode:
 
     else:
         st.markdown("""
-        <div class="mode-card" style="text-align:center; padding: 3rem;">
+        <div class="mode-card" style="text-align:center; padding:3rem;">
             <div style="font-size:3rem">🛣️</div>
             <div style="font-family:'Orbitron',monospace; color:#333355; font-size:0.9rem; letter-spacing:3px; margin-top:1rem">
                 UPLOAD UP TO 5 IMAGES TO BEGIN
@@ -334,24 +399,104 @@ elif "🎥" in mode:
             result, edges, line_count = process_frame(
                 frame, canny_low, canny_high, hough_threshold, min_line_length, max_line_gap
             )
-
             st.markdown("<br>", unsafe_allow_html=True)
             st.markdown('<div class="section-header">🔍 Detection Result</div>', unsafe_allow_html=True)
             show_result(frame, result, edges, line_count)
-
         else:
             st.markdown("""
-            <div class="warning-box">
-                ⚠️ Could not process image. Please try capturing again.
-            </div>
+            <div class="warning-box">⚠️ Could not process image. Please try capturing again.</div>
             """, unsafe_allow_html=True)
-
     else:
         st.markdown("""
-        <div class="mode-card" style="text-align:center; padding: 2rem;">
+        <div class="mode-card" style="text-align:center; padding:2rem;">
             <div style="font-size:3rem">📷</div>
             <div style="font-family:'Orbitron',monospace; color:#333355; font-size:0.9rem; letter-spacing:3px; margin-top:1rem">
                 CAPTURE A FRAME TO DETECT LANES
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+
+# ─── Video Mode ───────────────────────────────────────────────────────────────
+elif "🎬" in mode:
+    st.markdown('<div class="video-badge">VIDEO MODE</div>', unsafe_allow_html=True)
+
+    st.markdown("""
+    <div class="info-box">
+        🎬 Upload a dashcam or road video — lane detection will be applied to every frame
+        and you can download the processed video!
+    </div>
+    """, unsafe_allow_html=True)
+
+    uploaded_video = st.file_uploader(
+        "Upload a road video",
+        type=["mp4", "avi", "mov", "mkv"]
+    )
+
+    if uploaded_video is not None:
+        # Save uploaded video to temp file
+        tmp_input = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
+        tmp_input.write(uploaded_video.read())
+        tmp_input.flush()
+        tmp_input.close()
+
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown('<div class="section-header">⚙ Processing Video...</div>', unsafe_allow_html=True)
+
+        out_path, total_frames, fps, duration, total_lines = process_video(
+            tmp_input.name,
+            canny_low, canny_high, hough_threshold, min_line_length, max_line_gap
+        )
+
+        # Stats
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown('<div class="section-header">📊 Video Stats</div>', unsafe_allow_html=True)
+
+        s1, s2, s3, s4 = st.columns(4)
+        with s1:
+            st.markdown(f"""<div class="stat-box">
+                <div class="stat-number">{total_frames}</div>
+                <div class="stat-label">Total Frames</div>
+            </div>""", unsafe_allow_html=True)
+        with s2:
+            st.markdown(f"""<div class="stat-box">
+                <div class="stat-number">{round(fps)}</div>
+                <div class="stat-label">FPS</div>
+            </div>""", unsafe_allow_html=True)
+        with s3:
+            st.markdown(f"""<div class="stat-box">
+                <div class="stat-number">{duration}s</div>
+                <div class="stat-label">Duration</div>
+            </div>""", unsafe_allow_html=True)
+        with s4:
+            st.markdown(f"""<div class="stat-box">
+                <div class="stat-number">{total_lines}</div>
+                <div class="stat-label">Lines Detected</div>
+            </div>""", unsafe_allow_html=True)
+
+        # Play processed video
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown('<div class="section-header">🎬 Processed Video</div>', unsafe_allow_html=True)
+        st.video(out_path)
+
+        # Download button
+        with open(out_path, "rb") as f:
+            st.download_button(
+                label="⬇ DOWNLOAD PROCESSED VIDEO",
+                data=f,
+                file_name="lane_detection_output.mp4",
+                mime="video/mp4"
+            )
+
+        # Cleanup temp files
+        os.unlink(tmp_input.name)
+
+    else:
+        st.markdown("""
+        <div class="mode-card" style="text-align:center; padding:3rem;">
+            <div style="font-size:3rem">🎬</div>
+            <div style="font-family:'Orbitron',monospace; color:#333355; font-size:0.9rem; letter-spacing:3px; margin-top:1rem">
+                UPLOAD A ROAD VIDEO TO BEGIN
             </div>
         </div>
         """, unsafe_allow_html=True)
