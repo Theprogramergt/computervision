@@ -230,7 +230,7 @@ with st.sidebar:
     max_line_gap = st.slider("Max Line Gap", 1, 50, 5)
 
     st.markdown("<br>", unsafe_allow_html=True)
-    st.markdown('<div class="section-header">📡 Mode</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">Mode:</div>', unsafe_allow_html=True)
     mode = st.radio("", ["🖼️  Image Upload", "🎥  Live Camera"], label_visibility="collapsed")
 
     st.markdown("<br>", unsafe_allow_html=True)
