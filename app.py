@@ -2,8 +2,6 @@ import streamlit as st
 import cv2
 import numpy as np
 from PIL import Image
-import tempfile
-import os
 
 # ─── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -132,6 +130,17 @@ st.markdown("""
         margin-bottom: 1rem;
     }
 
+    .info-box {
+        background: #001a0a;
+        border: 1px solid #00ff88;
+        border-radius: 8px;
+        padding: 1rem;
+        color: #00ff88;
+        font-family: 'Rajdhani', sans-serif;
+        font-size: 0.9rem;
+        margin-bottom: 1rem;
+    }
+
     .warning-box {
         background: #1a1000;
         border: 1px solid #ffaa00;
@@ -145,6 +154,12 @@ st.markdown("""
     img { border-radius: 8px; }
 
     [data-testid="stImage"] { border-radius: 8px; overflow: hidden; }
+
+    [data-testid="stCameraInput"] > div {
+        border: 1px solid #1e1e3a !important;
+        border-radius: 12px !important;
+        background: #0f0f1a !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -185,6 +200,25 @@ def bgr_to_rgb(img):
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
+def show_result(original, result, edges, line_count):
+    r1, r2, r3 = st.columns([2, 2, 1])
+    with r1:
+        st.caption("ORIGINAL")
+        st.image(bgr_to_rgb(cv2.resize(original, (800, 500))), use_container_width=True)
+    with r2:
+        st.caption("LANE DETECTION")
+        st.image(bgr_to_rgb(result), use_container_width=True)
+    with r3:
+        st.caption("EDGES")
+        st.image(edges, use_container_width=True)
+        st.markdown(f"""
+        <div class="stat-box" style="margin-top:0.5rem">
+            <div class="stat-number">{line_count}</div>
+            <div class="stat-label">Lines Found</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+
 # ─── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown('<div class="section-header">⚙ Detection Parameters</div>', unsafe_allow_html=True)
@@ -197,7 +231,15 @@ with st.sidebar:
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown('<div class="section-header">📡 Mode</div>', unsafe_allow_html=True)
-    mode = st.radio("", ["🖼️  Image Upload", "🎥  Live Webcam"], label_visibility="collapsed")
+    mode = st.radio("", ["🖼️  Image Upload", "🎥  Live Camera"], label_visibility="collapsed")
+
+    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("""
+    <div style="font-family:'Rajdhani',sans-serif; color:#333355; font-size:0.75rem; letter-spacing:1px;">
+        LANE DETECTION AI · CV PROJECT<br>
+        Hough Transform · Canny Edge
+    </div>
+    """, unsafe_allow_html=True)
 
 
 # ─── Header ───────────────────────────────────────────────────────────────────
@@ -216,12 +258,11 @@ if "🖼️" in mode:
     )
 
     if uploaded_files:
-        uploaded_files = uploaded_files[:5]  # limit to 5
+        uploaded_files = uploaded_files[:5]
 
         total_lines = 0
         processed_count = 0
 
-        # Stats row
         col1, col2, col3 = st.columns(3)
         stat_placeholders = [col1.empty(), col2.empty(), col3.empty()]
 
@@ -242,27 +283,9 @@ if "🖼️" in mode:
             processed_count += 1
 
             st.markdown(f'<div class="section-header">IMAGE {i+1} — {uploaded_file.name}</div>', unsafe_allow_html=True)
-
-            c1, c2, c3 = st.columns([2, 2, 1])
-            with c1:
-                st.caption("ORIGINAL")
-                st.image(bgr_to_rgb(cv2.resize(image, (800, 500))), use_container_width=True)
-            with c2:
-                st.caption("LANE DETECTION")
-                st.image(bgr_to_rgb(result), use_container_width=True)
-            with c3:
-                st.caption("EDGES")
-                st.image(edges, use_container_width=True)
-                st.markdown(f"""
-                <div class="stat-box" style="margin-top:0.5rem">
-                    <div class="stat-number">{line_count}</div>
-                    <div class="stat-label">Lines Found</div>
-                </div>
-                """, unsafe_allow_html=True)
-
+            show_result(image, result, edges, line_count)
             st.markdown("<hr style='border-color:#1e1e3a; margin: 1.5rem 0'>", unsafe_allow_html=True)
 
-        # Update stats
         with stat_placeholders[0]:
             st.markdown(f"""<div class="stat-box">
                 <div class="stat-number">{processed_count}</div>
@@ -291,68 +314,44 @@ if "🖼️" in mode:
         """, unsafe_allow_html=True)
 
 
-# ─── Webcam Mode ──────────────────────────────────────────────────────────────
+# ─── Camera Mode ──────────────────────────────────────────────────────────────
 elif "🎥" in mode:
-    st.markdown('<div class="lane-badge">LIVE WEBCAM MODE</div>', unsafe_allow_html=True)
+    st.markdown('<div class="lane-badge">LIVE CAMERA MODE</div>', unsafe_allow_html=True)
 
     st.markdown("""
-    <div class="warning-box">
-        ⚠️  Streamlit does not support direct webcam streaming. Use the snapshot method below —
-        capture a frame from your webcam and process it instantly.
+    <div class="info-box">
+        📷 Allow camera access when your browser asks — point at a road and click capture!
     </div>
     """, unsafe_allow_html=True)
 
-    st.markdown("<br>", unsafe_allow_html=True)
+    camera_image = st.camera_input("Point your camera at a road and take a snapshot")
 
-    cam_col1, cam_col2 = st.columns(2)
+    if camera_image is not None:
+        file_bytes = np.asarray(bytearray(camera_image.read()), dtype=np.uint8)
+        frame = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
-    with cam_col1:
-        st.markdown('<div class="section-header">📸 Capture Frame</div>', unsafe_allow_html=True)
-        capture = st.button("CAPTURE FROM WEBCAM")
+        if frame is not None:
+            result, edges, line_count = process_frame(
+                frame, canny_low, canny_high, hough_threshold, min_line_length, max_line_gap
+            )
 
-        if capture:
-            cap = cv2.VideoCapture(0)
-            if cap.isOpened():
-                ret, frame = cap.read()
-                cap.release()
+            st.markdown("<br>", unsafe_allow_html=True)
+            st.markdown('<div class="section-header">🔍 Detection Result</div>', unsafe_allow_html=True)
+            show_result(frame, result, edges, line_count)
 
-                if ret:
-                    st.session_state["webcam_frame"] = frame
-                    st.success("Frame captured!")
-                else:
-                    st.error("Could not read from webcam.")
-            else:
-                st.error("Webcam not accessible. Make sure it's connected.")
-
-    with cam_col2:
-        st.markdown('<div class="section-header">📁 Or Upload Webcam Snapshot</div>', unsafe_allow_html=True)
-        snap_file = st.file_uploader("Upload a snapshot", type=["jpg", "jpeg", "png"], key="snap")
-        if snap_file:
-            file_bytes = np.asarray(bytearray(snap_file.read()), dtype=np.uint8)
-            st.session_state["webcam_frame"] = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-
-    if "webcam_frame" in st.session_state and st.session_state["webcam_frame"] is not None:
-        frame = st.session_state["webcam_frame"]
-        result, edges, line_count = process_frame(
-            frame, canny_low, canny_high, hough_threshold, min_line_length, max_line_gap
-        )
-
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown('<div class="section-header">🔍 Detection Result</div>', unsafe_allow_html=True)
-
-        r1, r2, r3 = st.columns([2, 2, 1])
-        with r1:
-            st.caption("ORIGINAL")
-            st.image(bgr_to_rgb(cv2.resize(frame, (800, 500))), use_container_width=True)
-        with r2:
-            st.caption("LANE DETECTION")
-            st.image(bgr_to_rgb(result), use_container_width=True)
-        with r3:
-            st.caption("EDGES")
-            st.image(edges, use_container_width=True)
-            st.markdown(f"""
-            <div class="stat-box" style="margin-top:0.5rem">
-                <div class="stat-number">{line_count}</div>
-                <div class="stat-label">Lines Found</div>
+        else:
+            st.markdown("""
+            <div class="warning-box">
+                ⚠️ Could not process image. Please try capturing again.
             </div>
             """, unsafe_allow_html=True)
+
+    else:
+        st.markdown("""
+        <div class="mode-card" style="text-align:center; padding: 2rem;">
+            <div style="font-size:3rem">📷</div>
+            <div style="font-family:'Orbitron',monospace; color:#333355; font-size:0.9rem; letter-spacing:3px; margin-top:1rem">
+                CAPTURE A FRAME TO DETECT LANES
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
