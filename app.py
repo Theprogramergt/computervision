@@ -237,6 +237,9 @@ def average_lines(image, lines):
     left_fit, right_fit = [], []
     if lines is None:
         return None, None
+    width = image.shape[1]
+    mid   = width // 2
+
     for line in lines:
         x1, y1, x2, y2 = line[0]
         if x1 == x2:
@@ -244,16 +247,24 @@ def average_lines(image, lines):
         slope = (y2 - y1) / (x2 - x1)
         intercept = y1 - slope * x1
         angle = abs(np.degrees(np.arctan(slope)))
-        if angle < 25 or angle > 85:   # ignore near-horizontal / near-vertical noise
+        if angle < 25 or angle > 85:
             continue
-        if slope < 0:
+        # Positional guard: segment midpoint must be on the correct side
+        seg_mid_x = (x1 + x2) / 2
+        if slope < 0 and seg_mid_x < mid:        # left line → must be left of centre
             left_fit.append((slope, intercept))
-        else:
+        elif slope > 0 and seg_mid_x > mid:      # right line → must be right of centre
             right_fit.append((slope, intercept))
+
     left_line  = make_coords(image, np.mean(left_fit,  axis=0)) if left_fit  else None
     right_line = make_coords(image, np.mean(right_fit, axis=0)) if right_fit else None
-    return left_line, right_line
 
+    # Final sanity check: left line bottom x must be left of right line bottom x
+    if left_line is not None and right_line is not None:
+        if left_line[0] >= right_line[0]:         # lines have crossed — discard both
+            return None, None
+
+    return left_line, right_line
 
 def process_frame(image, canny_low, canny_high, hough_threshold, min_line_length, max_line_gap, fast_mode=False):
     image = cv2.resize(image, (800, 500))
