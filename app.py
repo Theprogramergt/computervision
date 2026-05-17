@@ -177,35 +177,132 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+# ─── Lane Smoother for Video (keeps lines stable across frames) ────────────────
+class LaneSmoother:
+    def __init__(self, smooth_frames=8):
+        self.smooth_frames = smooth_frames
+        self.left_lines  = []
+        self.right_lines = []
+
+    def add(self, left, right):
+        if left is not None:
+            self.left_lines.append(left)
+            if len(self.left_lines) > self.smooth_frames:
+                self.left_lines.pop(0)
+        if right is not None:
+            self.right_lines.append(right)
+            if len(self.right_lines) > self.smooth_frames:
+                self.right_lines.pop(0)
+
+    def get(self):
+        left  = np.mean(self.left_lines,  axis=0).astype(int) if self.left_lines  else None
+        right = np.mean(self.right_lines, axis=0).astype(int) if self.right_lines else None
+        return left, right
+
+lane_smoother = LaneSmoother()
+
+
 # ─── Core Processing ───────────────────────────────────────────────────────────
+def make_coords(image, line_params):
+    """Convert slope/intercept to full lane segment coordinates."""
+    slope, intercept = line_params
+    height = image.shape[0]
+    y1 = height
+    y2 = int(height * 0.58)
+    if abs(slope) < 1e-6:
+        return None
+    x1 = int((y1 - intercept) / slope)
+    x2 = int((y2 - intercept) / slope)
+    return np.array([x1, y1, x2, y2])
+
+
+def average_lines(image, lines):
+    """Separate Hough segments into one averaged left + one right lane line."""
+    left_fit, right_fit = [], []
+    if lines is None:
+        return None, None
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+        if x1 == x2:
+            continue
+        slope = (y2 - y1) / (x2 - x1)
+        intercept = y1 - slope * x1
+        angle = abs(np.degrees(np.arctan(slope)))
+        if angle < 25 or angle > 85:   # ignore near-horizontal / near-vertical noise
+            continue
+        if slope < 0:
+            left_fit.append((slope, intercept))
+        else:
+            right_fit.append((slope, intercept))
+    left_line  = make_coords(image, np.mean(left_fit,  axis=0)) if left_fit  else None
+    right_line = make_coords(image, np.mean(right_fit, axis=0)) if right_fit else None
+    return left_line, right_line
+
+
 def process_frame(image, canny_low, canny_high, hough_threshold, min_line_length, max_line_gap):
     image = cv2.resize(image, (800, 500))
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    height, width = image.shape[:2]
+
+    # ── Night-vision boost: CLAHE on L channel ─────────────────────────────────
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+    l = clahe.apply(l)
+    enhanced = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
+
+    # ── Bilateral filter: removes noise, preserves lane edges ──────────────────
+    gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+    blur = cv2.bilateralFilter(gray, 9, 75, 75)
+
+    # ── Canny edges ────────────────────────────────────────────────────────────
     edges = cv2.Canny(blur, canny_low, canny_high)
 
-    height, width = edges.shape
+    # ── Trapezoid ROI (better than old triangle) ───────────────────────────────
     mask = np.zeros_like(edges)
     polygon = np.array([[
-        (0, height),
-        (width, height),
-        (width // 2, int(height * 0.6))
+        (int(width * 0.05), height),
+        (int(width * 0.95), height),
+        (int(width * 0.58), int(height * 0.58)),
+        (int(width * 0.42), int(height * 0.58)),
     ]], np.int32)
     cv2.fillPoly(mask, polygon, 255)
     cropped_edges = cv2.bitwise_and(edges, mask)
 
-    lines = cv2.HoughLinesP(cropped_edges, 2, np.pi / 180, hough_threshold,
-                            np.array([]), minLineLength=min_line_length, maxLineGap=max_line_gap)
+    # ── Hough transform ────────────────────────────────────────────────────────
+    lines = cv2.HoughLinesP(
+        cropped_edges, 1, np.pi / 180,
+        threshold=hough_threshold,
+        minLineLength=min_line_length,
+        maxLineGap=max_line_gap
+    )
 
+    # ── Average into 2 solid lane lines + smooth across video frames ───────────
+    left_line, right_line = average_lines(image, lines)
+    lane_smoother.add(left_line, right_line)
+    left_line, right_line = lane_smoother.get()
+
+    # ── Draw lanes ─────────────────────────────────────────────────────────────
     line_image = np.zeros_like(image)
     line_count = 0
-    if lines is not None:
-        line_count = len(lines)
-        for line in lines:
-            x1, y1, x2, y2 = line[0]
-            cv2.line(line_image, (x1, y1), (x2, y2), (0, 255, 136), 5)
 
-    combo = cv2.addWeighted(image, 0.8, line_image, 1, 1)
+    # Green tint fill between the two lanes
+    if left_line is not None and right_line is not None:
+        lane_poly = np.array([[
+            (left_line[0],  left_line[1]),
+            (left_line[2],  left_line[3]),
+            (right_line[2], right_line[3]),
+            (right_line[0], right_line[1]),
+        ]], np.int32)
+        cv2.fillPoly(line_image, lane_poly, (0, 80, 0))
+
+    for lane in [left_line, right_line]:
+        if lane is not None:
+            x1, y1, x2, y2 = lane
+            cv2.line(line_image, (x1, y1), (x2, y2), (0, 255, 136), 12)   # thick green
+            cv2.line(line_image, (x1, y1), (x2, y2), (255, 255, 255),  3)  # thin white centre
+            line_count += 1
+
+    combo = cv2.addWeighted(image, 0.85, line_image, 0.6, 0)
     return combo, cropped_edges, line_count
 
 
@@ -324,11 +421,11 @@ def load_image_from_url(url: str):
 with st.sidebar:
     st.markdown('<div class="section-header">⚙ Detection Parameters</div>', unsafe_allow_html=True)
 
-    canny_low    = st.slider("Canny Low Threshold",  10,  150,  50)
-    canny_high   = st.slider("Canny High Threshold", 50,  300, 150)
-    hough_threshold   = st.slider("Hough Threshold",      20,  200, 100)
-    min_line_length   = st.slider("Min Line Length",       10,  150,  40)
-    max_line_gap      = st.slider("Max Line Gap",           1,   50,   5)
+    canny_low         = st.slider("Canny Low Threshold",   10,  150,  50)
+    canny_high        = st.slider("Canny High Threshold",  50,  300, 150)
+    hough_threshold   = st.slider("Hough Threshold",       20,  200,  50)
+    min_line_length   = st.slider("Min Line Length",       10,  200,  80)
+    max_line_gap      = st.slider("Max Line Gap",           1,  100,  50)
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown('<div class="section-header">Mode:</div>', unsafe_allow_html=True)
@@ -522,6 +619,8 @@ elif "🎬" in mode:
 
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown('<div class="section-header">⚙ Processing Video...</div>', unsafe_allow_html=True)
+
+        lane_smoother.__init__()  # reset smoother for each new video
 
         out_path, total_frames, fps, duration, total_lines = process_video(
             tmp_input.name,
