@@ -4,6 +4,7 @@ import numpy as np
 import tempfile
 import os
 import urllib.request
+import subprocess
 
 # ─── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -177,6 +178,21 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
+# ─── FFmpeg Re-encoder (mp4v → H.264 so browsers can play it) ─────────────────
+def reencode_for_browser(input_path: str) -> str:
+    """Re-encode mp4v → H.264/yuv420p so every browser can play the output."""
+    output_path = input_path.replace(".mp4", "_h264.mp4")
+    subprocess.run([
+        "ffmpeg", "-y", "-i", input_path,
+        "-vcodec", "libx264",
+        "-crf", "23",
+        "-preset", "ultrafast",
+        "-pix_fmt", "yuv420p",
+        output_path
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return output_path
+
+
 # ─── Lane Smoother for Video (keeps lines stable across frames) ────────────────
 class LaneSmoother:
     def __init__(self, smooth_frames=8):
@@ -342,82 +358,7 @@ def show_result(original, result, edges, line_count):
         """, unsafe_allow_html=True)
 
 
-def process_video(video_path, canny_low, canny_high, hough_threshold, min_line_length, max_line_gap):
-    cap = cv2.VideoCapture(video_path)
-
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps          = cap.get(cv2.CAP_PROP_FPS)
-    duration     = round(total_frames / fps, 1) if fps > 0 else 0
-
-    # ── Speed optimisation: cap processing at 15 fps max ──────────────────────
-    # If source is 24/30 fps we skip every other frame → 2x faster
-    # Output still plays at original fps (duplicating skipped frames)
-    TARGET_PROCESS_FPS = 10              # process 10 frames/sec → ~3x faster on 24fps video
-    frame_skip = max(1, int(round(fps / TARGET_PROCESS_FPS)))
-
-    out_path = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
-    fourcc   = cv2.VideoWriter_fourcc(*"mp4v")
-    out      = cv2.VideoWriter(out_path, fourcc, fps, (800, 500))
-
-    progress_bar = st.progress(0)
-    status_text  = st.empty()
-    preview_slot = st.empty()
-
-    frame_idx       = 0
-    total_lines_all = 0
-    last_result     = None   # reuse for skipped frames
-
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-
-        if frame_idx % frame_skip == 0:
-            # process this frame
-            result, _, line_count = process_frame(
-                frame, canny_low, canny_high, hough_threshold, min_line_length, max_line_gap,
-                fast_mode=True
-            )
-            total_lines_all += line_count
-            last_result = result
-        else:
-            # reuse last processed result for skipped frames (saves ~50% time)
-            result = last_result if last_result is not None else cv2.resize(frame, (800, 500))
-
-        out.write(result)
-
-        # Update UI every 30 frames
-        if frame_idx % 30 == 0:
-            progress = int((frame_idx / max(total_frames, 1)) * 100)
-            progress_bar.progress(progress)
-            elapsed_frames = frame_idx + 1
-            eta_frames = total_frames - elapsed_frames
-            eta_sec = round(eta_frames / fps) if fps > 0 else 0
-            status_text.markdown(f"""
-            <div style="font-family:'Rajdhani',sans-serif; color:#00ff88; font-size:0.85rem; letter-spacing:2px;">
-                ⚡ PROCESSING FRAME {frame_idx} / {total_frames} — {progress}% — ETA {eta_sec}s
-            </div>
-            """, unsafe_allow_html=True)
-            preview_slot.image(bgr_to_rgb(result), caption=f"Live Preview — Frame {frame_idx}", use_container_width=True)
-
-        frame_idx += 1
-
-    cap.release()
-    out.release()
-    progress_bar.progress(100)
-    status_text.markdown("""
-    <div style="font-family:'Rajdhani',sans-serif; color:#00ff88; font-size:0.85rem; letter-spacing:2px;">
-        ✅ PROCESSING COMPLETE
-    </div>
-    """, unsafe_allow_html=True)
-    preview_slot.empty()
-
-    return out_path, total_frames, fps, duration, total_lines_all
-
-
 # ─── Sample Image Loader ───────────────────────────────────────────────────────
-# Replace these URLs with your actual raw GitHub URLs after uploading the images
-# Format: https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/samples/image1.jpg
 SAMPLE_IMAGES = [
     {
         "name": "Solid White Curve",
@@ -487,7 +428,6 @@ if "🖼️" in mode:
     )
 
     if uploaded_files:
-        # ── User uploaded their own images ──
         uploaded_files = uploaded_files[:5]
         total_lines = 0
         processed_count = 0
@@ -530,7 +470,6 @@ if "🖼️" in mode:
             </div>""", unsafe_allow_html=True)
 
     else:
-        # ── No upload yet → show sample images ──
         st.markdown("""
         <div class="info-box">
             🛣️ No image uploaded yet — try the <strong>3 sample road images</strong> below,
@@ -654,7 +593,7 @@ elif "🎬" in mode:
         fps          = cap.get(cv2.CAP_PROP_FPS) or 24
         duration     = round(total_frames / fps, 1)
 
-        # Output file
+        # Output file (mp4v — will be re-encoded to H.264 after processing)
         out_path = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
         fourcc   = cv2.VideoWriter_fourcc(*"mp4v")
         out      = cv2.VideoWriter(out_path, fourcc, fps, (800, 500))
@@ -662,11 +601,10 @@ elif "🎬" in mode:
         # ── UI layout ──────────────────────────────────────────────────────────
         st.markdown('<div class="section-header">🎬 Live Lane Detection</div>', unsafe_allow_html=True)
 
-        # Two columns: live feed left, stats right
         vid_col, stat_col = st.columns([3, 1])
 
         with vid_col:
-            live_frame   = st.empty()   # live video frame updates here
+            live_frame = st.empty()
 
         with stat_col:
             prog_bar     = st.progress(0)
@@ -676,12 +614,11 @@ elif "🎬" in mode:
             stat_lines   = st.empty()
 
         # ── Process & stream frames live ───────────────────────────────────────
-        TARGET_FPS   = 10
-        frame_skip   = max(1, int(round(fps / TARGET_FPS)))
-        frame_idx    = 0
+        TARGET_FPS      = 10
+        frame_skip      = max(1, int(round(fps / TARGET_FPS)))
+        frame_idx       = 0
         total_lines_all = 0
-        last_result  = None
-        import time
+        last_result     = None
 
         while cap.isOpened():
             ret, frame = cap.read()
@@ -700,19 +637,16 @@ elif "🎬" in mode:
 
             out.write(result)
 
-            # Stream every processed frame to the live player
             if frame_idx % frame_skip == 0:
                 progress = int((frame_idx / max(total_frames, 1)) * 100)
                 eta      = round((total_frames - frame_idx) / fps)
 
-                # Update live video frame
                 live_frame.image(
                     bgr_to_rgb(result),
                     use_container_width=True,
                     caption=f"Frame {frame_idx} / {total_frames}"
                 )
 
-                # Update side stats
                 prog_bar.progress(progress)
                 status_box.markdown(f"""
                 <div style="font-family:'Rajdhani',sans-serif;color:#00ff88;
@@ -736,6 +670,15 @@ elif "🎬" in mode:
 
         cap.release()
         out.release()
+
+        # ── Re-encode to H.264 so the browser can play it ─────────────────────
+        with st.spinner("⚙️ Encoding video for browser playback..."):
+            browser_path = reencode_for_browser(out_path)
+            # Clean up the raw mp4v file
+            try:
+                os.unlink(out_path)
+            except Exception:
+                pass
 
         # ── Final stats row ────────────────────────────────────────────────────
         st.markdown("<br>", unsafe_allow_html=True)
@@ -762,12 +705,12 @@ elif "🎬" in mode:
                 <div class="stat-label">Lines Detected</div>
             </div>""", unsafe_allow_html=True)
 
-        # ── Playback of fully processed video + download ───────────────────────
+        # ── Playback + download ────────────────────────────────────────────────
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown('<div class="section-header">▶ Full Processed Video — Play & Download</div>', unsafe_allow_html=True)
-        st.video(out_path)
+        st.video(browser_path)
 
-        with open(out_path, "rb") as f:
+        with open(browser_path, "rb") as f:
             st.download_button(
                 label="⬇ DOWNLOAD PROCESSED VIDEO",
                 data=f,
@@ -776,7 +719,11 @@ elif "🎬" in mode:
             )
 
         # Cleanup temp files
-        os.unlink(tmp_input.name)
+        try:
+            os.unlink(tmp_input.name)
+            os.unlink(browser_path)
+        except Exception:
+            pass
 
     else:
         st.markdown("""
