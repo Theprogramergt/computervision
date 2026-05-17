@@ -239,31 +239,39 @@ def average_lines(image, lines):
     return left_line, right_line
 
 
-def process_frame(image, canny_low, canny_high, hough_threshold, min_line_length, max_line_gap):
+def process_frame(image, canny_low, canny_high, hough_threshold, min_line_length, max_line_gap, fast_mode=False):
     image = cv2.resize(image, (800, 500))
     height, width = image.shape[:2]
 
+    # ── In fast_mode: detect on half-res, draw on full-res ────────────────────
+    detect_img = cv2.resize(image, (400, 250)) if fast_mode else image
+    dh, dw = detect_img.shape[:2]
+    scale  = 2.0 if fast_mode else 1.0
+
     # ── Night-vision boost: CLAHE on L channel ─────────────────────────────────
-    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    lab = cv2.cvtColor(detect_img, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
     clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
     l = clahe.apply(l)
     enhanced = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
 
-    # ── Bilateral filter: removes noise, preserves lane edges ──────────────────
+    # ── Blur ───────────────────────────────────────────────────────────────────
     gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
-    blur = cv2.bilateralFilter(gray, 9, 75, 75)
+    if fast_mode:
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    else:
+        blur = cv2.bilateralFilter(gray, 9, 75, 75)
 
     # ── Canny edges ────────────────────────────────────────────────────────────
     edges = cv2.Canny(blur, canny_low, canny_high)
 
-    # ── Trapezoid ROI (better than old triangle) ───────────────────────────────
+    # ── Trapezoid ROI ──────────────────────────────────────────────────────────
     mask = np.zeros_like(edges)
     polygon = np.array([[
-        (int(width * 0.05), height),
-        (int(width * 0.95), height),
-        (int(width * 0.58), int(height * 0.58)),
-        (int(width * 0.42), int(height * 0.58)),
+        (int(dw * 0.05), dh),
+        (int(dw * 0.95), dh),
+        (int(dw * 0.58), int(dh * 0.58)),
+        (int(dw * 0.42), int(dh * 0.58)),
     ]], np.int32)
     cv2.fillPoly(mask, polygon, 255)
     cropped_edges = cv2.bitwise_and(edges, mask)
@@ -271,21 +279,24 @@ def process_frame(image, canny_low, canny_high, hough_threshold, min_line_length
     # ── Hough transform ────────────────────────────────────────────────────────
     lines = cv2.HoughLinesP(
         cropped_edges, 1, np.pi / 180,
-        threshold=hough_threshold,
-        minLineLength=min_line_length,
+        threshold=max(10, hough_threshold // (2 if fast_mode else 1)),
+        minLineLength=max(5,  min_line_length // (2 if fast_mode else 1)),
         maxLineGap=max_line_gap
     )
 
-    # ── Average into 2 solid lane lines + smooth across video frames ───────────
+    # ── Scale lines back to full resolution if needed ──────────────────────────
+    if fast_mode and lines is not None:
+        lines = (lines * scale).astype(np.int32)
+
+    # ── Average into 2 solid lane lines + smooth ───────────────────────────────
     left_line, right_line = average_lines(image, lines)
     lane_smoother.add(left_line, right_line)
     left_line, right_line = lane_smoother.get()
 
-    # ── Draw lanes ─────────────────────────────────────────────────────────────
+    # ── Draw on full-resolution image ──────────────────────────────────────────
     line_image = np.zeros_like(image)
     line_count = 0
 
-    # Green tint fill between the two lanes
     if left_line is not None and right_line is not None:
         lane_poly = np.array([[
             (left_line[0],  left_line[1]),
@@ -298,12 +309,14 @@ def process_frame(image, canny_low, canny_high, hough_threshold, min_line_length
     for lane in [left_line, right_line]:
         if lane is not None:
             x1, y1, x2, y2 = lane
-            cv2.line(line_image, (x1, y1), (x2, y2), (0, 255, 136), 12)   # thick green
-            cv2.line(line_image, (x1, y1), (x2, y2), (255, 255, 255),  3)  # thin white centre
+            cv2.line(line_image, (x1, y1), (x2, y2), (0, 255, 136), 12)
+            cv2.line(line_image, (x1, y1), (x2, y2), (255, 255, 255),  3)
             line_count += 1
 
+    # edges display: upscale back for the UI
+    display_edges = cv2.resize(cropped_edges, (width, height)) if fast_mode else cropped_edges
     combo = cv2.addWeighted(image, 0.85, line_image, 0.6, 0)
-    return combo, cropped_edges, line_count
+    return combo, display_edges, line_count
 
 
 def bgr_to_rgb(img):
@@ -339,7 +352,7 @@ def process_video(video_path, canny_low, canny_high, hough_threshold, min_line_l
     # ── Speed optimisation: cap processing at 15 fps max ──────────────────────
     # If source is 24/30 fps we skip every other frame → 2x faster
     # Output still plays at original fps (duplicating skipped frames)
-    TARGET_PROCESS_FPS = 15
+    TARGET_PROCESS_FPS = 10              # process 10 frames/sec → ~3x faster on 24fps video
     frame_skip = max(1, int(round(fps / TARGET_PROCESS_FPS)))
 
     out_path = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
@@ -362,7 +375,8 @@ def process_video(video_path, canny_low, canny_high, hough_threshold, min_line_l
         if frame_idx % frame_skip == 0:
             # process this frame
             result, _, line_count = process_frame(
-                frame, canny_low, canny_high, hough_threshold, min_line_length, max_line_gap
+                frame, canny_low, canny_high, hough_threshold, min_line_length, max_line_gap,
+                fast_mode=True
             )
             total_lines_all += line_count
             last_result = result
@@ -616,8 +630,8 @@ elif "🎬" in mode:
 
     st.markdown("""
     <div class="info-box">
-        🎬 Upload a dashcam or road video — lane detection will be applied to every frame
-        and you can download the processed video!
+        🎬 Upload a dashcam or road video — green lane detection plays live on the video
+        as it processes, then download the result!
     </div>
     """, unsafe_allow_html=True)
 
@@ -633,20 +647,99 @@ elif "🎬" in mode:
         tmp_input.flush()
         tmp_input.close()
 
-        st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown('<div class="section-header">⚙ Processing Video...</div>', unsafe_allow_html=True)
+        lane_smoother.__init__()
 
-        lane_smoother.__init__()  # reset smoother for each new video
+        cap          = cv2.VideoCapture(tmp_input.name)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps          = cap.get(cv2.CAP_PROP_FPS) or 24
+        duration     = round(total_frames / fps, 1)
 
-        out_path, total_frames, fps, duration, total_lines = process_video(
-            tmp_input.name,
-            canny_low, canny_high, hough_threshold, min_line_length, max_line_gap
-        )
+        # Output file
+        out_path = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
+        fourcc   = cv2.VideoWriter_fourcc(*"mp4v")
+        out      = cv2.VideoWriter(out_path, fourcc, fps, (800, 500))
 
-        # Stats
+        # ── UI layout ──────────────────────────────────────────────────────────
+        st.markdown('<div class="section-header">🎬 Live Lane Detection</div>', unsafe_allow_html=True)
+
+        # Two columns: live feed left, stats right
+        vid_col, stat_col = st.columns([3, 1])
+
+        with vid_col:
+            live_frame   = st.empty()   # live video frame updates here
+
+        with stat_col:
+            prog_bar     = st.progress(0)
+            status_box   = st.empty()
+            stat_frames  = st.empty()
+            stat_fps_box = st.empty()
+            stat_lines   = st.empty()
+
+        # ── Process & stream frames live ───────────────────────────────────────
+        TARGET_FPS   = 10
+        frame_skip   = max(1, int(round(fps / TARGET_FPS)))
+        frame_idx    = 0
+        total_lines_all = 0
+        last_result  = None
+        import time
+
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            if frame_idx % frame_skip == 0:
+                result, _, line_count = process_frame(
+                    frame, canny_low, canny_high, hough_threshold,
+                    min_line_length, max_line_gap, fast_mode=True
+                )
+                total_lines_all += line_count
+                last_result = result
+            else:
+                result = last_result if last_result is not None else cv2.resize(frame, (800, 500))
+
+            out.write(result)
+
+            # Stream every processed frame to the live player
+            if frame_idx % frame_skip == 0:
+                progress = int((frame_idx / max(total_frames, 1)) * 100)
+                eta      = round((total_frames - frame_idx) / fps)
+
+                # Update live video frame
+                live_frame.image(
+                    bgr_to_rgb(result),
+                    use_container_width=True,
+                    caption=f"Frame {frame_idx} / {total_frames}"
+                )
+
+                # Update side stats
+                prog_bar.progress(progress)
+                status_box.markdown(f"""
+                <div style="font-family:'Rajdhani',sans-serif;color:#00ff88;
+                            font-size:0.8rem;letter-spacing:2px;margin-bottom:0.5rem">
+                    {'✅ DONE' if progress==100 else f'⚡ {progress}% — ETA {eta}s'}
+                </div>""", unsafe_allow_html=True)
+                stat_frames.markdown(f"""<div class="stat-box" style="margin-bottom:0.5rem">
+                    <div class="stat-number" style="font-size:1.2rem">{frame_idx}</div>
+                    <div class="stat-label">Frame</div>
+                </div>""", unsafe_allow_html=True)
+                stat_fps_box.markdown(f"""<div class="stat-box" style="margin-bottom:0.5rem">
+                    <div class="stat-number" style="font-size:1.2rem">{round(fps)}</div>
+                    <div class="stat-label">FPS</div>
+                </div>""", unsafe_allow_html=True)
+                stat_lines.markdown(f"""<div class="stat-box">
+                    <div class="stat-number" style="font-size:1.2rem">{total_lines_all}</div>
+                    <div class="stat-label">Lines Found</div>
+                </div>""", unsafe_allow_html=True)
+
+            frame_idx += 1
+
+        cap.release()
+        out.release()
+
+        # ── Final stats row ────────────────────────────────────────────────────
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown('<div class="section-header">📊 Video Stats</div>', unsafe_allow_html=True)
-
         s1, s2, s3, s4 = st.columns(4)
         with s1:
             st.markdown(f"""<div class="stat-box">
@@ -665,16 +758,15 @@ elif "🎬" in mode:
             </div>""", unsafe_allow_html=True)
         with s4:
             st.markdown(f"""<div class="stat-box">
-                <div class="stat-number">{total_lines}</div>
+                <div class="stat-number">{total_lines_all}</div>
                 <div class="stat-label">Lines Detected</div>
             </div>""", unsafe_allow_html=True)
 
-        # Play processed video
+        # ── Playback of fully processed video + download ───────────────────────
         st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown('<div class="section-header">🎬 Processed Video</div>', unsafe_allow_html=True)
+        st.markdown('<div class="section-header">▶ Full Processed Video — Play & Download</div>', unsafe_allow_html=True)
         st.video(out_path)
 
-        # Download button
         with open(out_path, "rb") as f:
             st.download_button(
                 label="⬇ DOWNLOAD PROCESSED VIDEO",
