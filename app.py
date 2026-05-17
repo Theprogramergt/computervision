@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 import tempfile
 import os
+import urllib.request
 
 # ─── Page Config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -287,6 +288,38 @@ def process_video(video_path, canny_low, canny_high, hough_threshold, min_line_l
     return out_path, total_frames, fps, duration, total_lines_all
 
 
+# ─── Sample Image Loader ───────────────────────────────────────────────────────
+# Replace these URLs with your actual raw GitHub URLs after uploading the images
+# Format: https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/samples/image1.jpg
+SAMPLE_IMAGES = [
+    {
+        "name": "Sample Road 1",
+        "url": "https://raw.githubusercontent.com/Theprogramergt/computervision/main/tusimple_images/YOUR_IMAGE_1.jpg"
+    },
+    {
+        "name": "Sample Road 2",
+        "url": "https://raw.githubusercontent.com/Theprogramergt/computervision/main/tusimple_images/YOUR_IMAGE_2.jpg"
+    },
+    {
+        "name": "Sample Road 3",
+        "url": "https://raw.githubusercontent.com/Theprogramergt/computervision/main/tusimple_images/YOUR_IMAGE_3.jpg"
+    },
+]
+
+
+@st.cache_data(show_spinner=False)
+def load_image_from_url(url: str):
+    """Download image from URL and decode into a BGR numpy array. Returns None on failure."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = np.frombuffer(resp.read(), dtype=np.uint8)
+        img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        return img
+    except Exception:
+        return None
+
+
 # ─── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown('<div class="section-header">⚙ Detection Parameters</div>', unsafe_allow_html=True)
@@ -327,6 +360,7 @@ if "🖼️" in mode:
     )
 
     if uploaded_files:
+        # ── User uploaded their own images ──
         uploaded_files = uploaded_files[:5]
         total_lines = 0
         processed_count = 0
@@ -369,14 +403,60 @@ if "🖼️" in mode:
             </div>""", unsafe_allow_html=True)
 
     else:
+        # ── No upload yet → show sample images ──
         st.markdown("""
-        <div class="mode-card" style="text-align:center; padding:3rem;">
-            <div style="font-size:3rem">🛣️</div>
-            <div style="font-family:'Orbitron',monospace; color:#333355; font-size:0.9rem; letter-spacing:3px; margin-top:1rem">
-                UPLOAD UP TO 5 IMAGES TO BEGIN
-            </div>
+        <div class="info-box">
+            🛣️ No image uploaded yet — try the <strong>3 sample road images</strong> below,
+            or upload your own above!
         </div>
         """, unsafe_allow_html=True)
+
+        st.markdown('<div class="section-header">🔬 Sample Images — Try Immediately</div>', unsafe_allow_html=True)
+
+        total_lines = 0
+        processed_count = 0
+
+        for i, sample in enumerate(SAMPLE_IMAGES):
+            with st.spinner(f"Loading sample: {sample['name']}..."):
+                image = load_image_from_url(sample["url"])
+
+            if image is None:
+                st.markdown(f"""
+                <div class="warning-box">
+                    ⚠️ Could not load sample "{sample['name']}". 
+                    Check that the GitHub URL is correct and the image is publicly accessible.
+                </div>
+                """, unsafe_allow_html=True)
+                continue
+
+            result, edges, line_count = process_frame(
+                image, canny_low, canny_high, hough_threshold, min_line_length, max_line_gap
+            )
+            total_lines += line_count
+            processed_count += 1
+
+            st.markdown(f'<div class="section-header">SAMPLE {i+1} — {sample["name"]}</div>', unsafe_allow_html=True)
+            show_result(image, result, edges, line_count)
+            st.markdown("<hr style='border-color:#1e1e3a; margin:1.5rem 0'>", unsafe_allow_html=True)
+
+        if processed_count > 0:
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.markdown(f"""<div class="stat-box">
+                    <div class="stat-number">{processed_count}</div>
+                    <div class="stat-label">Samples Shown</div>
+                </div>""", unsafe_allow_html=True)
+            with col2:
+                st.markdown(f"""<div class="stat-box">
+                    <div class="stat-number">{total_lines}</div>
+                    <div class="stat-label">Total Lines</div>
+                </div>""", unsafe_allow_html=True)
+            with col3:
+                avg = round(total_lines / processed_count, 1) if processed_count else 0
+                st.markdown(f"""<div class="stat-box">
+                    <div class="stat-number">{avg}</div>
+                    <div class="stat-label">Avg Per Sample</div>
+                </div>""", unsafe_allow_html=True)
 
 
 # ─── Camera Mode ──────────────────────────────────────────────────────────────
