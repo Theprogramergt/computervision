@@ -178,9 +178,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-# ─── FFmpeg Re-encoder (mp4v → H.264 so browsers can play it) ─────────────────
+# ─── FFmpeg Re-encoder ─────────────────────────────────────────────────────────
 def reencode_for_browser(input_path: str) -> str:
-    """Re-encode mp4v → H.264/yuv420p so every browser can play the output."""
     output_path = input_path.replace(".mp4", "_h264.mp4")
     subprocess.run([
         "ffmpeg", "-y", "-i", input_path,
@@ -193,7 +192,7 @@ def reencode_for_browser(input_path: str) -> str:
     return output_path
 
 
-# ─── Lane Smoother for Video (keeps lines stable across frames) ────────────────
+# ─── Lane Smoother (image mode only) ──────────────────────────────────────────
 class LaneSmoother:
     def __init__(self, smooth_frames=8):
         self.smooth_frames = smooth_frames
@@ -218,9 +217,8 @@ class LaneSmoother:
 lane_smoother = LaneSmoother()
 
 
-# ─── Core Processing ───────────────────────────────────────────────────────────
+# ─── Helpers ──────────────────────────────────────────────────────────────────
 def make_coords(image, line_params):
-    """Convert slope/intercept to full lane segment coordinates."""
     slope, intercept = line_params
     height = image.shape[0]
     y1 = height
@@ -233,7 +231,7 @@ def make_coords(image, line_params):
 
 
 def average_lines(image, lines):
-    """Separate Hough segments into one averaged left + one right lane line."""
+    """Used for IMAGE mode: averaged left + right solid lane line with position guard."""
     left_fit, right_fit = [], []
     if lines is None:
         return None, None
@@ -249,98 +247,148 @@ def average_lines(image, lines):
         angle = abs(np.degrees(np.arctan(slope)))
         if angle < 25 or angle > 85:
             continue
-        # Positional guard: segment midpoint must be on the correct side
         seg_mid_x = (x1 + x2) / 2
-        if slope < 0 and seg_mid_x < mid:        # left line → must be left of centre
+        if slope < 0 and seg_mid_x < mid:
             left_fit.append((slope, intercept))
-        elif slope > 0 and seg_mid_x > mid:      # right line → must be right of centre
+        elif slope > 0 and seg_mid_x > mid:
             right_fit.append((slope, intercept))
 
     left_line  = make_coords(image, np.mean(left_fit,  axis=0)) if left_fit  else None
     right_line = make_coords(image, np.mean(right_fit, axis=0)) if right_fit else None
 
-    # Final sanity check: left line bottom x must be left of right line bottom x
+    # Sanity check: lines must not cross
     if left_line is not None and right_line is not None:
-        if left_line[0] >= right_line[0]:         # lines have crossed — discard both
+        if left_line[0] >= right_line[0]:
             return None, None
 
     return left_line, right_line
 
-def process_frame(image, canny_low, canny_high, hough_threshold, min_line_length, max_line_gap, fast_mode=False):
+
+def bgr_to_rgb(img):
+    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+
+# ─── IMAGE MODE frame processor (averaged lines) ──────────────────────────────
+def process_frame_image(image, canny_low, canny_high, hough_threshold, min_line_length, max_line_gap):
     image = cv2.resize(image, (800, 500))
     height, width = image.shape[:2]
 
-    # ── In fast_mode: detect on half-res, draw on full-res ────────────────────
-    detect_img = cv2.resize(image, (400, 250)) if fast_mode else image
-    dh, dw = detect_img.shape[:2]
-    scale  = 2.0 if fast_mode else 1.0
-
-    # ── Night-vision boost: CLAHE on L channel ─────────────────────────────────
-    lab = cv2.cvtColor(detect_img, cv2.COLOR_BGR2LAB)
+    # CLAHE enhancement
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
     clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
     l = clahe.apply(l)
     enhanced = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
 
-    # ── Blur ───────────────────────────────────────────────────────────────────
     gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
-    if fast_mode:
-        blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    else:
-        blur = cv2.bilateralFilter(gray, 9, 75, 75)
-
-    # ── Canny edges ────────────────────────────────────────────────────────────
+    blur = cv2.bilateralFilter(gray, 9, 75, 75)
     edges = cv2.Canny(blur, canny_low, canny_high)
 
-    # ── Trapezoid ROI ──────────────────────────────────────────────────────────
+    # Trapezoid ROI
     mask = np.zeros_like(edges)
     polygon = np.array([[
-        (int(dw * 0.05), dh),
-        (int(dw * 0.95), dh),
-        (int(dw * 0.58), int(dh * 0.58)),
-        (int(dw * 0.42), int(dh * 0.58)),
+        (int(width * 0.05), height),
+        (int(width * 0.95), height),
+        (int(width * 0.58), int(height * 0.58)),
+        (int(width * 0.42), int(height * 0.58)),
     ]], np.int32)
     cv2.fillPoly(mask, polygon, 255)
     cropped_edges = cv2.bitwise_and(edges, mask)
 
-    # ── Hough transform ────────────────────────────────────────────────────────
     lines = cv2.HoughLinesP(
         cropped_edges, 1, np.pi / 180,
-        threshold=max(10, hough_threshold // (2 if fast_mode else 1)),
-        minLineLength=max(5,  min_line_length // (2 if fast_mode else 1)),
+        threshold=hough_threshold,
+        minLineLength=min_line_length,
         maxLineGap=max_line_gap
     )
 
-    # ── Scale lines back to full resolution if needed ──────────────────────────
-    if fast_mode and lines is not None:
-        lines = (lines * scale).astype(np.int32)
-
-    # ── Average into 2 solid lane lines + smooth ───────────────────────────────
     left_line, right_line = average_lines(image, lines)
     lane_smoother.add(left_line, right_line)
     left_line, right_line = lane_smoother.get()
 
-    # ── Draw precise lines only — no polygon fill ──────────────────────────────
     line_image = np.zeros_like(image)
     line_count = 0
-
     for lane in [left_line, right_line]:
         if lane is not None:
             x1, y1, x2, y2 = lane
-            # Outer glow for visibility
             cv2.line(line_image, (x1, y1), (x2, y2), (0, 180, 80), 14)
-            # Sharp bright centre line
             cv2.line(line_image, (x1, y1), (x2, y2), (0, 255, 136), 5)
             line_count += 1
 
-    # edges display: upscale back for the UI
-    display_edges = cv2.resize(cropped_edges, (width, height)) if fast_mode else cropped_edges
     combo = cv2.addWeighted(image, 0.85, line_image, 0.9, 0)
-    return combo, display_edges, line_count
+    return combo, cropped_edges, line_count
 
 
-def bgr_to_rgb(img):
-    return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+# ─── VIDEO MODE frame processor (raw Hough segments, like local script) ────────
+def process_frame_video(image, canny_low, canny_high, hough_threshold, min_line_length, max_line_gap):
+    """
+    Draws every raw Hough segment directly — same approach as the local OpenCV script.
+    Much more accurate because lines sit exactly on the detected markings.
+    Filtered by angle and position to remove noise.
+    """
+    image = cv2.resize(image, (800, 500))
+    height, width = image.shape[:2]
+
+    # CLAHE enhancement
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+    l = clahe.apply(l)
+    enhanced = cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
+
+    gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blur, canny_low, canny_high)
+
+    # Trapezoid ROI — slightly wider bottom for dashcam footage
+    mask = np.zeros_like(edges)
+    polygon = np.array([[
+        (int(width * 0.05), height),
+        (int(width * 0.95), height),
+        (int(width * 0.58), int(height * 0.58)),
+        (int(width * 0.42), int(height * 0.58)),
+    ]], np.int32)
+    cv2.fillPoly(mask, polygon, 255)
+    cropped_edges = cv2.bitwise_and(edges, mask)
+
+    lines = cv2.HoughLinesP(
+        cropped_edges, 1, np.pi / 180,
+        threshold=max(10, hough_threshold // 2),
+        minLineLength=max(5, min_line_length // 2),
+        maxLineGap=max_line_gap
+    )
+
+    line_image = np.zeros_like(image)
+    line_count = 0
+
+    if lines is not None:
+        mid = width // 2
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            if x1 == x2:
+                continue
+            slope = (y2 - y1) / (x2 - x1)
+            angle = abs(np.degrees(np.arctan(slope)))
+
+            # Filter: only road-plausible angles
+            if angle < 20 or angle > 88:
+                continue
+
+            seg_mid_x = (x1 + x2) / 2
+
+            # Positional guard: left segments stay left, right segments stay right
+            if slope < 0 and seg_mid_x > mid:
+                continue
+            if slope > 0 and seg_mid_x < mid:
+                continue
+
+            # Draw each raw segment directly on the marking
+            cv2.line(line_image, (x1, y1), (x2, y2), (0, 200, 80), 6)   # glow
+            cv2.line(line_image, (x1, y1), (x2, y2), (0, 255, 136), 3)  # sharp line
+            line_count += 1
+
+    combo = cv2.addWeighted(image, 0.85, line_image, 0.9, 0)
+    return combo, cropped_edges, line_count
 
 
 def show_result(original, result, edges, line_count):
@@ -381,7 +429,6 @@ SAMPLE_IMAGES = [
 
 @st.cache_data(show_spinner=False)
 def load_image_from_url(url: str):
-    """Download image from URL and decode into a BGR numpy array. Returns None on failure."""
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -399,8 +446,8 @@ with st.sidebar:
     canny_low         = st.slider("Canny Low Threshold",   10,  150,  50)
     canny_high        = st.slider("Canny High Threshold",  50,  300, 150)
     hough_threshold   = st.slider("Hough Threshold",       20,  200,  50)
-    min_line_length   = st.slider("Min Line Length",       10,  200,  80)
-    max_line_gap      = st.slider("Max Line Gap",           1,  100,  50)
+    min_line_length   = st.slider("Min Line Length",       10,  200,  40)
+    max_line_gap      = st.slider("Max Line Gap",           1,  100,   5)
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown('<div class="section-header">Mode:</div>', unsafe_allow_html=True)
@@ -446,7 +493,7 @@ if "🖼️" in mode:
             if image is None:
                 continue
 
-            result, edges, line_count = process_frame(
+            result, edges, line_count = process_frame_image(
                 image, canny_low, canny_high, hough_threshold, min_line_length, max_line_gap
             )
             total_lines += line_count
@@ -499,7 +546,7 @@ if "🖼️" in mode:
                 """, unsafe_allow_html=True)
                 continue
 
-            result, edges, line_count = process_frame(
+            result, edges, line_count = process_frame_image(
                 image, canny_low, canny_high, hough_threshold, min_line_length, max_line_gap
             )
             total_lines += line_count
@@ -546,7 +593,7 @@ elif "🎥" in mode:
         frame = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
         if frame is not None:
-            result, edges, line_count = process_frame(
+            result, edges, line_count = process_frame_image(
                 frame, canny_low, canny_high, hough_threshold, min_line_length, max_line_gap
             )
             st.markdown("<br>", unsafe_allow_html=True)
@@ -573,8 +620,8 @@ elif "🎬" in mode:
 
     st.markdown("""
     <div class="info-box">
-        🎬 Upload a dashcam or road video — green lane lines are drawn precisely on the
-        detected lane markings, then download the result!
+        🎬 Upload a dashcam or road video — raw Hough segments drawn precisely on every
+        detected lane marking, just like the local OpenCV script but better filtered!
     </div>
     """, unsafe_allow_html=True)
 
@@ -584,32 +631,25 @@ elif "🎬" in mode:
     )
 
     if uploaded_video is not None:
-        # Save uploaded video to temp file
         tmp_input = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
         tmp_input.write(uploaded_video.read())
         tmp_input.flush()
         tmp_input.close()
-
-        lane_smoother.__init__()
 
         cap          = cv2.VideoCapture(tmp_input.name)
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps          = cap.get(cv2.CAP_PROP_FPS) or 24
         duration     = round(total_frames / fps, 1)
 
-        # Output file (mp4v — will be re-encoded to H.264 after processing)
         out_path = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
         fourcc   = cv2.VideoWriter_fourcc(*"mp4v")
         out      = cv2.VideoWriter(out_path, fourcc, fps, (800, 500))
 
-        # ── UI layout ──────────────────────────────────────────────────────────
         st.markdown('<div class="section-header">🎬 Live Lane Detection</div>', unsafe_allow_html=True)
 
         vid_col, stat_col = st.columns([3, 1])
-
         with vid_col:
             live_frame = st.empty()
-
         with stat_col:
             prog_bar     = st.progress(0)
             status_box   = st.empty()
@@ -617,7 +657,6 @@ elif "🎬" in mode:
             stat_fps_box = st.empty()
             stat_lines   = st.empty()
 
-        # ── Process & stream frames live ───────────────────────────────────────
         TARGET_FPS      = 10
         frame_skip      = max(1, int(round(fps / TARGET_FPS)))
         frame_idx       = 0
@@ -630,9 +669,10 @@ elif "🎬" in mode:
                 break
 
             if frame_idx % frame_skip == 0:
-                result, _, line_count = process_frame(
+                # ── Use raw segment approach for accuracy ──────────────────────
+                result, _, line_count = process_frame_video(
                     frame, canny_low, canny_high, hough_threshold,
-                    min_line_length, max_line_gap, fast_mode=True
+                    min_line_length, max_line_gap
                 )
                 total_lines_all += line_count
                 last_result = result
@@ -650,7 +690,6 @@ elif "🎬" in mode:
                     use_container_width=True,
                     caption=f"Frame {frame_idx} / {total_frames}"
                 )
-
                 prog_bar.progress(progress)
                 status_box.markdown(f"""
                 <div style="font-family:'Rajdhani',sans-serif;color:#00ff88;
@@ -675,7 +714,7 @@ elif "🎬" in mode:
         cap.release()
         out.release()
 
-        # ── Re-encode to H.264 so the browser can play it ─────────────────────
+        # Re-encode to H.264 for browser playback
         with st.spinner("⚙️ Encoding video for browser playback..."):
             browser_path = reencode_for_browser(out_path)
             try:
@@ -683,7 +722,7 @@ elif "🎬" in mode:
             except Exception:
                 pass
 
-        # ── Final stats row ────────────────────────────────────────────────────
+        # Final stats
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown('<div class="section-header">📊 Video Stats</div>', unsafe_allow_html=True)
         s1, s2, s3, s4 = st.columns(4)
@@ -708,7 +747,6 @@ elif "🎬" in mode:
                 <div class="stat-label">Lines Detected</div>
             </div>""", unsafe_allow_html=True)
 
-        # ── Playback + download ────────────────────────────────────────────────
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown('<div class="section-header">▶ Full Processed Video — Play & Download</div>', unsafe_allow_html=True)
         st.video(browser_path)
@@ -721,7 +759,6 @@ elif "🎬" in mode:
                 mime="video/mp4"
             )
 
-        # Cleanup temp files
         try:
             os.unlink(tmp_input.name)
             os.unlink(browser_path)
