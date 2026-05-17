@@ -309,29 +309,22 @@ def process_frame(image, canny_low, canny_high, hough_threshold, min_line_length
     lane_smoother.add(left_line, right_line)
     left_line, right_line = lane_smoother.get()
 
-    # ── Draw on full-resolution image ──────────────────────────────────────────
+    # ── Draw precise lines only — no polygon fill ──────────────────────────────
     line_image = np.zeros_like(image)
     line_count = 0
-
-    if left_line is not None and right_line is not None:
-        lane_poly = np.array([[
-            (left_line[0],  left_line[1]),
-            (left_line[2],  left_line[3]),
-            (right_line[2], right_line[3]),
-            (right_line[0], right_line[1]),
-        ]], np.int32)
-        cv2.fillPoly(line_image, lane_poly, (0, 80, 0))
 
     for lane in [left_line, right_line]:
         if lane is not None:
             x1, y1, x2, y2 = lane
-            cv2.line(line_image, (x1, y1), (x2, y2), (0, 255, 136), 12)
-            cv2.line(line_image, (x1, y1), (x2, y2), (255, 255, 255),  3)
+            # Outer glow for visibility
+            cv2.line(line_image, (x1, y1), (x2, y2), (0, 180, 80), 14)
+            # Sharp bright centre line
+            cv2.line(line_image, (x1, y1), (x2, y2), (0, 255, 136), 5)
             line_count += 1
 
     # edges display: upscale back for the UI
     display_edges = cv2.resize(cropped_edges, (width, height)) if fast_mode else cropped_edges
-    combo = cv2.addWeighted(image, 0.85, line_image, 0.6, 0)
+    combo = cv2.addWeighted(image, 0.85, line_image, 0.9, 0)
     return combo, display_edges, line_count
 
 
@@ -569,8 +562,8 @@ elif "🎬" in mode:
 
     st.markdown("""
     <div class="info-box">
-        🎬 Upload a dashcam or road video — green lane detection plays live on the video
-        as it processes, then download the result!
+        🎬 Upload a dashcam or road video — green lane lines are drawn precisely on the
+        detected lane markings, then download the result!
     </div>
     """, unsafe_allow_html=True)
 
@@ -674,7 +667,6 @@ elif "🎬" in mode:
         # ── Re-encode to H.264 so the browser can play it ─────────────────────
         with st.spinner("⚙️ Encoding video for browser playback..."):
             browser_path = reencode_for_browser(out_path)
-            # Clean up the raw mp4v file
             try:
                 os.unlink(out_path)
             except Exception:
