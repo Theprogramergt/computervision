@@ -293,16 +293,16 @@ def process_video(video_path, canny_low, canny_high, hough_threshold, min_line_l
 # Format: https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/samples/image1.jpg
 SAMPLE_IMAGES = [
     {
-        "name": "Sample Road 1",
-        "url": "https://raw.githubusercontent.com/Theprogramergt/computervision/main/tusimple_images/YOUR_IMAGE_1.jpg"
+        "name": "Solid White Curve",
+        "url": "https://raw.githubusercontent.com/Theprogramergt/computervision/main/tusimple_images/solidWhiteCurve.jpg"
     },
     {
-        "name": "Sample Road 2",
-        "url": "https://raw.githubusercontent.com/Theprogramergt/computervision/main/tusimple_images/YOUR_IMAGE_2.jpg"
+        "name": "Solid White Right",
+        "url": "https://raw.githubusercontent.com/Theprogramergt/computervision/main/tusimple_images/solidWhiteRight.jpg"
     },
     {
-        "name": "Sample Road 3",
-        "url": "https://raw.githubusercontent.com/Theprogramergt/computervision/main/tusimple_images/YOUR_IMAGE_3.jpg"
+        "name": "Solid Yellow Left",
+        "url": "https://raw.githubusercontent.com/Theprogramergt/computervision/main/tusimple_images/solidYellowLeft.jpg"
     },
 ]
 
