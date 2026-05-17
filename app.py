@@ -333,42 +333,58 @@ def process_video(video_path, canny_low, canny_high, hough_threshold, min_line_l
     cap = cv2.VideoCapture(video_path)
 
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    duration = round(total_frames / fps, 1) if fps > 0 else 0
+    fps          = cap.get(cv2.CAP_PROP_FPS)
+    duration     = round(total_frames / fps, 1) if fps > 0 else 0
 
-    # Output video setup
+    # ── Speed optimisation: cap processing at 15 fps max ──────────────────────
+    # If source is 24/30 fps we skip every other frame → 2x faster
+    # Output still plays at original fps (duplicating skipped frames)
+    TARGET_PROCESS_FPS = 15
+    frame_skip = max(1, int(round(fps / TARGET_PROCESS_FPS)))
+
     out_path = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False).name
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    out = cv2.VideoWriter(out_path, fourcc, fps, (800, 500))
+    fourcc   = cv2.VideoWriter_fourcc(*"mp4v")
+    out      = cv2.VideoWriter(out_path, fourcc, fps, (800, 500))
 
     progress_bar = st.progress(0)
-    status_text = st.empty()
+    status_text  = st.empty()
     preview_slot = st.empty()
 
-    frame_idx = 0
+    frame_idx       = 0
     total_lines_all = 0
+    last_result     = None   # reuse for skipped frames
 
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
 
-        result, edges, line_count = process_frame(
-            frame, canny_low, canny_high, hough_threshold, min_line_length, max_line_gap
-        )
-        total_lines_all += line_count
+        if frame_idx % frame_skip == 0:
+            # process this frame
+            result, _, line_count = process_frame(
+                frame, canny_low, canny_high, hough_threshold, min_line_length, max_line_gap
+            )
+            total_lines_all += line_count
+            last_result = result
+        else:
+            # reuse last processed result for skipped frames (saves ~50% time)
+            result = last_result if last_result is not None else cv2.resize(frame, (800, 500))
+
         out.write(result)
 
-        # Update every 15 frames
-        if frame_idx % 15 == 0:
+        # Update UI every 30 frames
+        if frame_idx % 30 == 0:
             progress = int((frame_idx / max(total_frames, 1)) * 100)
             progress_bar.progress(progress)
+            elapsed_frames = frame_idx + 1
+            eta_frames = total_frames - elapsed_frames
+            eta_sec = round(eta_frames / fps) if fps > 0 else 0
             status_text.markdown(f"""
             <div style="font-family:'Rajdhani',sans-serif; color:#00ff88; font-size:0.85rem; letter-spacing:2px;">
-                PROCESSING FRAME {frame_idx} / {total_frames} — {progress}%
+                ⚡ PROCESSING FRAME {frame_idx} / {total_frames} — {progress}% — ETA {eta_sec}s
             </div>
             """, unsafe_allow_html=True)
-            preview_slot.image(bgr_to_rgb(result), caption=f"Preview — Frame {frame_idx}", use_container_width=True)
+            preview_slot.image(bgr_to_rgb(result), caption=f"Live Preview — Frame {frame_idx}", use_container_width=True)
 
         frame_idx += 1
 
@@ -429,8 +445,8 @@ with st.sidebar:
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown('<div class="section-header">Mode:</div>', unsafe_allow_html=True)
-    mode = st.radio("", ["🖼️  Image Upload", "🎥  Live Camera", "🎬  Video Upload"],
-                    label_visibility="collapsed")
+    mode = st.radio("Select Mode", ["🖼️  Image Upload", "🎥  Live Camera", "🎬  Video Upload"],
+                    label_visibility="hidden")
 
     st.markdown("<br>", unsafe_allow_html=True)
     st.markdown("""
